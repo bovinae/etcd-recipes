@@ -86,3 +86,14 @@ func (q *Queue) Dequeue(blocking bool) (string, error) {
 	}
 	return string(ev.Kv.Value), err
 }
+
+func (q *Queue) Empty() (bool, error) {
+	resp, err := q.client.Get(q.ctx, q.keyPrefix, v3.WithPrefix())
+	if err != nil {
+		return true, err
+	}
+	if len(resp.Kvs) == 0 {
+		return true, nil
+	}
+	return false, nil
+}
