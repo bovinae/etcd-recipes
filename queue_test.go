@@ -92,6 +92,16 @@ func TestQueue(t *testing.T) {
 			So(err, ShouldEqual, nil)
 			So(ok, ShouldEqual, true)
 		})
+		Convey("Clear", func() {
+			err := q.Enqueue("3")
+			So(err, ShouldEqual, nil)
+			cnt, err := q.Clear()
+			So(err, ShouldEqual, nil)
+			So(cnt, ShouldEqual, 1)
+			ok, err := q.Empty()
+			So(err, ShouldEqual, nil)
+			So(ok, ShouldEqual, true)
+		})
 	})
 }
 

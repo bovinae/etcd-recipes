@@ -97,3 +97,11 @@ func (q *Queue) Empty() (bool, error) {
 	}
 	return false, nil
 }
+
+func (q *Queue) Clear() (int64, error) {
+	resp, err := q.client.Delete(q.ctx, q.keyPrefix, v3.WithPrefix())
+	if err != nil {
+		return 0, err
+	}
+	return resp.Deleted, nil
+}
