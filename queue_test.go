@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
+	"sort"
 	"strconv"
 	"sync"
 	"testing"
@@ -114,6 +115,7 @@ func TestConcurrencyReadWrite(t *testing.T) {
 	}()
 
 	q := NewQueue(etcdCli, "test")
+	q.Delete()
 	var wg sync.WaitGroup
 	concurrency := 2
 	wg.Add(concurrency)
@@ -136,7 +138,7 @@ func TestConcurrencyReadWrite(t *testing.T) {
 
 	wg.Add(concurrency + 1)
 	start = time.Now()
-	ch := make(chan string)
+	ch := make(chan int)
 	for i := 0; i < concurrency; i++ {
 		i := i
 		go func() {
@@ -149,45 +151,144 @@ func TestConcurrencyReadWrite(t *testing.T) {
 					}
 					panic(err)
 				}
-				ch <- val
+				i, _ := strconv.Atoi(val)
+				ch <- i
 			}
 			fmt.Println("dequeue done:", i)
-			ch <- "-1"
+			ch <- -1
 			wg.Done()
 		}()
 	}
-	tmp1 := make([]int, 0, 1000)
-	tmp2 := make([]int, 0, 1001)
+	tmp := make([][]int, concurrency)
+	for i := 0; i < concurrency; i++ {
+		tmp[i] = make([]int, 0, batch)
+	}
 	go func() {
 		done := 0
-		for val := range ch {
-			i, _ := strconv.Atoi(val)
+		for i := range ch {
 			if i == -1 {
 				done++
-				if done == 2 {
+				if done == concurrency {
 					wg.Done()
 					return
 				}
 			} else {
-				if i < 1000 {
-					tmp1 = append(tmp1, i)
-				} else {
-					tmp2 = append(tmp2, i)
-				}
+				tmp[i/batch] = append(tmp[i/batch], i)
 			}
 		}
 	}()
 	wg.Wait()
 	fmt.Println("dequeue cost:", time.Since(start))
-	for i := 0; i < len(tmp1); i++ {
-		if i != tmp1[i] {
-			fmt.Println("concurrency error")
+	var queueSize int
+	for i := 0; i < concurrency; i++ {
+		for j := 0; j < len(tmp[i]); j++ {
+			if j+i*batch != tmp[i][j] {
+				panic("concurrency error")
+			}
 		}
+		queueSize += len(tmp[i])
 	}
-	for i := 0; i < len(tmp2); i++ {
-		if i+batch != tmp2[i] {
-			fmt.Println("concurrency error")
+	Convey("TestConcurrencyReadWrite", t, func() {
+		Convey("queue size", func() {
+			So(queueSize, ShouldEqual, concurrency*batch)
+		})
+	})
+}
+
+func TestConcurrencyReadWriteWithFailure(t *testing.T) {
+	go func() {
+		err := http.ListenAndServe(":8081", nil)
+		if err != nil {
+			fmt.Printf("http.ListenAndServe failed, err:%s", err)
 		}
+	}()
+
+	q := NewQueue(etcdCli, "test")
+	q.Delete()
+	var wg sync.WaitGroup
+	concurrency := 2
+	wg.Add(concurrency)
+	start := time.Now()
+	beginId := 0
+	batch := 1000
+	for i := 0; i < concurrency; i++ {
+		i := i
+		go func(beginId int) {
+			for j := beginId; j < beginId+batch; j++ {
+				q.Enqueue(strconv.Itoa(j))
+			}
+			fmt.Println("enqueue done:", i)
+			wg.Done()
+		}(beginId)
+		beginId += batch
 	}
-	fmt.Println("queue size:", len(tmp1)+len(tmp2))
+	wg.Wait()
+	fmt.Println("enqueue cost:", time.Since(start))
+
+	wg.Add(concurrency + 1)
+	start = time.Now()
+	ch := make(chan int)
+	var reEnqueueNum int
+	for i := 0; i < concurrency; i++ {
+		i := i
+		go func() {
+			for {
+				val, err := q.Dequeue(false)
+				if err != nil {
+					fmt.Println(err)
+					if err == ErrEmptyQueue {
+						break
+					}
+					panic(err)
+				}
+				i, _ := strconv.Atoi(val)
+				if i%2 == 0 || reEnqueueNum >= concurrency*batch/2 {
+					ch <- i
+				} else {
+					reEnqueueNum++
+					q.Enqueue(strconv.Itoa(i))
+				}
+			}
+			fmt.Println("dequeue done:", i)
+			ch <- -1
+			wg.Done()
+		}()
+	}
+	tmp := make([][]int, concurrency)
+	for i := 0; i < concurrency; i++ {
+		tmp[i] = make([]int, 0, batch)
+	}
+	go func() {
+		done := 0
+		for i := range ch {
+			if i == -1 {
+				done++
+				if done == concurrency {
+					wg.Done()
+					return
+				}
+			} else {
+				tmp[i/batch] = append(tmp[i/batch], i)
+			}
+		}
+	}()
+	wg.Wait()
+	fmt.Println("dequeue cost:", time.Since(start))
+	var queueSize int
+	for i := 0; i < concurrency; i++ {
+		sort.Slice(tmp[i], func(i2, j int) bool {
+			return tmp[i][i2] < tmp[i][j]
+		})
+		for j := 0; j < len(tmp[i]); j++ {
+			if j+i*batch != tmp[i][j] {
+				panic("concurrency error")
+			}
+		}
+		queueSize += len(tmp[i])
+	}
+	Convey("TestConcurrencyReadWriteWithFailure", t, func() {
+		Convey("queue size", func() {
+			So(queueSize, ShouldEqual, concurrency*batch)
+		})
+	})
 }
